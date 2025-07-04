@@ -61,10 +61,11 @@ export function FragmentWeb({ data }: Props) {
 
       <iframe
         key={fragmentKey}
+        src={data.sandboxUrl} // liveViewLink
         className="h-full w-full"
         sandbox="allow-forms allow-scripts allow-same-origin"
         loading="lazy"
-        src={data.sandboxUrl}
+        allow="clipboard-read; clipboard-write"
       />
     </div>
   );

@@ -50,9 +50,9 @@ export const messagesRouter = createTRPCRouter({
 
       // Background Job (Inngest)
       await inngest.send({
-        name: "code-agent/run",
+        name: "browser-agent/run",
         data: {
-          value: input.value,
+          value: input.value, // user prompt
           projectId: input.projectId,
         },
       });

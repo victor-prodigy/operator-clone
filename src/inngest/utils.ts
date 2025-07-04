@@ -1,13 +1,12 @@
-import { Sandbox } from "@e2b/code-interpreter";
 import { AgentResult, TextMessage } from "@inngest/agent-kit";
 
-// This function should return the sandbox URL
-export async function getSandbox(sandboxId: string) {
-  const sandbox = await Sandbox.connect(sandboxId);
-  return sandbox;
+// Função utilitária para montar a URL de visualização do sandbox do Browserbase
+export function getSandbox(sessionId: string) {
+  // Retorna a URL de replay/inspeção da sessão do Browserbase
+  return `https://browserbase.com/sessions/${sessionId}`;
 }
 
-// This function retrieves the last text message content from the assistant in the agent result
+// Esta função recupera o último conteúdo de mensagem de texto do assistente no resultado do agente
 export function lastAssistantTextMessageContent(result: AgentResult) {
   const lastAssistantMessageIndex = result.output.findLastIndex(
     (message) => message.role === "assistant"

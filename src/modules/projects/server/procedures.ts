@@ -69,7 +69,7 @@ export const projectsRouter = createTRPCRouter({
 
       // Background Job (Inngest)
       await inngest.send({
-        name: "code-agent/run",
+        name: "browser-agent/run",
         data: {
           value: input.value,
           projectId: createdProject.id,

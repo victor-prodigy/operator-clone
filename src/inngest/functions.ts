@@ -1,5 +1,6 @@
 // Inngest em produção faz com que rode em background, ou seja, não bloqueia o front-end mesmo se o usuário fechar a página
-import { Sandbox } from "@e2b/code-interpreter";
+import { chromium } from "playwright-core";
+import Browserbase from "@browserbasehq/sdk";
 import {
   openai,
   // anthropic,
@@ -22,215 +23,128 @@ interface AgentState {
   files: { [path: string]: string };
 }
 
-export const codeAgentFunction = inngest.createFunction(
-  { id: "code-agent" },
-  { event: "code-agent/run" }, // function name
+const bb = new Browserbase({
+  apiKey: process.env.BROWSERBASE_API_KEY as string,
+});
+
+export const scrapeTitle = inngest.createFunction(
+  { id: "web-scrape-title" },
+  { event: "web.scrape.title" },
   async ({ event, step }) => {
-    // NOTE: create sandboxId
-    const sandboxId = await step.run("get-sandbox-id", async () => {
-      // Create a new sandbox for the user
-      const sandbox = await Sandbox.create("lovable-nextjs-clone-test-2");
-      return sandbox.sandboxId;
+    // Create a new session
+    const session = await bb.sessions.create({
+      projectId: process.env.BROWSERBASE_PROJECT_ID as string,
     });
 
-    // Create a new agent with a system prompt (you can add optional tools, too)
-    const codeAgent = createAgent<AgentState>({
-      name: "code-agent",
-      description:
-        "An expert coding agent that writes code based on user input",
-      system: PROMPT,
-      model: openai({
-        model: "gpt-4.1",
-        // https://youtu.be/xs8mWnbMcmc?t=11965
-        defaultParameters: { temperature: 0.1 },
-      }),
-      // model: openai({ model: "gpt-4o", apiKey: process.env.TOGETHER_API_KEY }),
-      tools: [
-        // NOTE: this tool will run commands in the sandbox terminal
-        createTool({
-          name: "terminal",
-          description: "Use the terminal to run commands",
-          parameters: z.object({
-            command: z.string(),
-          }),
-          handler: async ({ command }, { step }) => {
-            return await step?.run("terminal", async () => {
-              const buffers = { stdout: "", stderr: "" };
+    // Connect to the session
+    const browser = await chromium.connectOverCDP(session.connectUrl);
+    try {
+      const page = await browser.newPage();
 
-              try {
-                // NOTE: get sandbox by sandboxId
-                const sandbox = await getSandbox(sandboxId);
-                // https://e2b.dev/docs/commands
-                const result = await sandbox.commands.run(command, {
-                  onStdout: (data: string) => {
-                    buffers.stdout += data;
-                  },
-                  onStderr: (data: string) => {
-                    buffers.stderr += data;
-                  },
-                });
-                return result.stdout;
-              } catch (error) {
-                console.error(
-                  `Command failed: ${error} \nstdout: ${buffers.stdout} \nstderr: ${buffers.stderr}`
-                );
-                // --legady-peer-deps error
-                return `Command failed: ${error} \nstdout: ${buffers.stdout} \nstderr: ${buffers.stderr}`;
-              }
-            });
-          },
-        }),
+      // Construct the search URL
+      // O value de @procedures.ts refere-se ao valor do prompt enviado pelo usuário, ou seja, input.value.
+      // Portanto, você pode acessar assim:
+      const searchUrl = `https://search-new.pullpush.io/?type=submission&q=${event.data.value}`;
 
-        // NOTE: this tool will create or update files in the sandbox
-        createTool({
-          name: "createOrUpdateFiles",
-          description: "Create or update files in the sandbox",
-          parameters: z.object({
-            files: z.array(
-              z.object({
-                path: z.string(),
-                content: z.string(),
-              })
-            ),
-          }),
-          handler: async (
-            { files },
-            { step, network }: Tool.Options<AgentState>
-          ) => {
-            const newFiles = await step?.run(
-              "create-or-update-files",
-              async () => {
-                try {
-                  const updatedFiles = network.state.data.files || {};
-                  const sandbox = await getSandbox(sandboxId);
-                  for (const file of files) {
-                    await sandbox.files.write(file.path, file.content);
-                    updatedFiles[file.path] = file.content;
-                  }
+      console.log(searchUrl);
 
-                  return updatedFiles;
-                } catch (error) {
-                  return "Error: " + error;
-                }
-              }
-            );
+      await page.goto(searchUrl);
 
-            if (typeof newFiles === "object") {
-              network.state.data.files = newFiles;
-            }
-          },
-        }),
+      // Wait for results to load
+      await page.waitForSelector("div.results", { timeout: 10000 });
 
-        // NOTE: this tool will read files from the sandbox
-        createTool({
-          name: "readFiles",
-          description: "Read files from the sandbox",
-          parameters: z.object({
-            files: z.array(z.string()),
-          }),
-          handler: async ({ files }, { step }) => {
-            return await step?.run("readFiles", async () => {
-              try {
-                const sandbox = await getSandbox(sandboxId);
-                const contents = []; // array to hold file contents (qualquer formato de arquivo, por exemplo, JSON, YAML, etc.)
-                for (const file of files) {
-                  const content = await sandbox.files.read(file);
-                  contents.push({ path: file, content });
-                }
-
-                // NOTE: return contents as JSON string for the AI agent to read
-                return JSON.stringify(contents);
-              } catch (error) {
-                return "Error: " + error;
-              }
-            });
-          },
-        }),
-      ],
-
-      // NOTE: extract the last message from the assistant and verify if it contains <task_summary></task_summary>
-      lifecycle: {
-        onResponse: async ({ result, network }) => {
-          const lastAssistantMessageText =
-            lastAssistantTextMessageContent(result);
-
-          if (lastAssistantMessageText && network) {
-            if (lastAssistantMessageText.includes("<task_summary>")) {
-              network.state.data.summary = lastAssistantMessageText;
-            }
-          }
-
-          return result;
-        },
-      },
-    });
-
-    // Networks are Systems of Agents. Use Networks to create powerful AI workflows by combining multiple Agents.
-    const network = createNetwork<AgentState>({
-      name: "coding-agent-network",
-      agents: [codeAgent],
-      maxIter: 15, // Maximum number of iterations for the network to run (credits usage)
-      // https://youtu.be/xs8mWnbMcmc?t=12547
-      router: async ({ network }) => {
-        const summary = network.state.data.summary;
-
-        if (summary) {
-          return;
-        }
-
-        return codeAgent;
-      },
-    });
-
-    const result = await network.run(event.data.value);
-
-    // NOTE: check if the result is an error
-    const isError =
-      !result.state.data.summary ||
-      Object.keys(result.state.data.files || {}).length === 0;
-
-    // NOTE: generate sandbox url com base no sandboxId hospedado no E2B
-    const sandboxUrl = await step.run("get-sandbox-url", async () => {
-      const sandbox = await getSandbox(sandboxId);
-      const host = sandbox.getHost(3000);
-      return `https://${host}`;
-    });
-
-    // NOTE: salving the result in the database when the background job is done
-    await step.run("save-result", async () => {
-      if (isError) {
-        return await prisma.message.create({
-          data: {
-            projectId: event.data.projectId,
-            content: "Something went wrong. Please try again.",
-            role: "ASSISTANT", // Assuming role is ASSISTANT for the AI agent
-            type: "ERROR", // Assuming type is ERROR for the AI agent
-          },
-        });
-      }
-
-      return await prisma.message.create({
-        data: {
-          projectId: event.data.projectId,
-          content: result.state.data.summary,
-          role: "ASSISTANT", // Assuming role is ASSISTANT for the AI agent
-          type: "RESULT", // Assuming type is RESULT for the AI agent
-          fragment: {
-            create: {
-              sandboxUrl: sandboxUrl,
-              title: "Fragment",
-              files: result.state.data.files,
-            },
-          },
-        },
+      // Extract search results
+      const results = await page.evaluate(() => {
+        const posts = document.querySelectorAll("div.results div:has(h1)");
+        return Array.from(posts).map((post) => ({
+          title: post.querySelector("h1")?.textContent?.trim(),
+          content: post.querySelector("div")?.textContent?.trim(),
+        }));
       });
-    });
 
-    return {
-      url: sandboxUrl,
-      title: "Fragment",
-      files: result.state.data.files,
-      summary: result.state.data.summary,
-    };
+      console.log("results", JSON.stringify(results, null, 2));
+
+      return results.slice(0, 5); // Return top 5 results
+    } finally {
+      await browser.close();
+    }
   }
 );
+
+// export const scrapeTitle = inngest.createFunction(
+//   { id: "web-scrape-title" },
+//   { event: "web.scrape.title" },
+//   async ({ event, step }) => {
+//     const { prompt, projectId } = event.data;
+
+//     // 1. Inicialize Stagehand (Browserbase)
+//     const stagehand = new Stagehand({
+//       env: "BROWSERBASE",
+//       apiKey: process.env.BROWSERBASE_API_KEY,
+//       projectId: process.env.BROWSERBASE_PROJECT_ID!,
+//       modelName: "gpt-4o",
+//       modelClientOptions: {
+//         apiKey: process.env.OPENAI_API_KEY,
+//       },
+//     });
+//     await stagehand.init();
+//     const page = stagehand.page;
+
+//     // 2. Crie o agente do Inngest Agent Kit
+//     const agent = createAgent({
+//       name: "browser-agent",
+//       model: openai({ model: "gpt-4o", apiKey: process.env.OPENAI_API_KEY! }),
+//       tools: [
+//         createTool({
+//           name: "goto",
+//           description:
+//             "Navega para uma URL no navegador controlado pelo Stagehand",
+//           parameters: z.object({ url: z.string().url() }),
+//           handler: async (input) => {
+//             await page.goto(input.url);
+//             return { result: `Navegado para ${input.url}` };
+//           },
+//         }),
+//         createTool({
+//           name: "getTitle",
+//           description: "Extrai o título da página atual",
+//           parameters: z.object({}),
+//           handler: async () => {
+//             const { title } = await page.extract({
+//               instruction: "O título da página",
+//               schema: z.object({ title: z.string() }),
+//             });
+//             return { title };
+//           },
+//         }),
+//       ],
+//       system: PROMPT,
+//     });
+
+//     // 3. O agente interpreta o prompt do usuário e executa as ferramentas
+//     const agentResult = await agent.run(prompt);
+
+//     // 4. Feche o navegador
+//     await stagehand.close();
+
+//     // 5. Obtenha o título extraído do resultado do agente
+//     let title = undefined;
+//     for (const toolCall of agentResult.toolCalls) {
+//       if (
+//         toolCall.tool.name === "getTitle" &&
+//         toolCall.content &&
+//         typeof toolCall.content === "object" &&
+//         "title" in toolCall.content
+//       ) {
+//         title = toolCall.content.title;
+//         break;
+//       }
+//     }
+
+//     // 6. Obtenha o sessionId do Stagehand para replay
+//     const sessionId = (stagehand as any).session?.id || null;
+
+//     // 7. Salve ou retorne o resultado
+//     return { title, sessionId };
+//   }
+// );

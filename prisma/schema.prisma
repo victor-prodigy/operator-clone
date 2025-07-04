@@ -42,15 +42,15 @@ model Message {
   fragment Fragment?
 }
 
-// This model is used to store fragments of code or other content related to a message.
+// This model is used to store fragments of browser or other content related to a message.
 model Fragment {
   id        String  @id @default(uuid())
   messageId String  @unique
   message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
 
   sandboxUrl String
+  sessionId  String?  // (opcional) ID da sessão do Browserbase
   title      String
-  files      Json
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
