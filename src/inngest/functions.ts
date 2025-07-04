@@ -1,4 +1,4 @@
-// Inngest em produção faz com que rode em background, ou seja, não bloqueia o front-end mesmo se o usuário fechar a página
+// Inngest em produção roda em background, ou seja, não bloqueia o front-end mesmo se o usuário fechar a página
 import { chromium } from "playwright-core";
 import Browserbase from "@browserbasehq/sdk";
 import {
@@ -8,143 +8,120 @@ import {
   createTool,
   createNetwork,
   type Tool,
-  // type Message,
-  // createState,
+  type Message,
+  createState,
 } from "@inngest/agent-kit";
 import { inngest } from "./client";
-import { getSandbox, lastAssistantTextMessageContent } from "./utils";
-import { z } from "zod";
-import { PROMPT } from "@/prompt";
+import { FRAGMENT_TITLE_PROMPT, RESPONSE_PROMPT } from "@/prompt";
 import { prisma } from "@/lib/db";
-
-// NOTE: define o type para summary e files para ser mais restrito na validação desses dados
-interface AgentState {
-  summary: string;
-  files: { [path: string]: string };
-}
 
 const bb = new Browserbase({
   apiKey: process.env.BROWSERBASE_API_KEY as string,
 });
 
-export const scrapeTitle = inngest.createFunction(
-  { id: "web-scrape-title" },
-  { event: "web.scrape.title" },
+export const browserAgentFunction = inngest.createFunction(
+  { id: "browser-agent" },
+  { event: "browser-agent/run" },
   async ({ event, step }) => {
-    // Create a new session
-    const session = await bb.sessions.create({
-      projectId: process.env.BROWSERBASE_PROJECT_ID as string,
+    const query = event.data.query as string;
+
+    // Cria uma nova sessão no Browserbase
+    const session = await step.run("create-session", async () => {
+      return await bb.sessions.create({
+        projectId: process.env.BROWSERBASE_PROJECT_ID as string,
+      });
     });
 
-    // Connect to the session
-    const browser = await chromium.connectOverCDP(session.connectUrl);
+    const sessionId = session.id;
+    const sandboxUrl = `https://browserbase.com/sessions/${sessionId}`;
+
+    // Conecta ao navegador remoto
+    const browser = await step.run("connect-browser", async () => {
+      return await chromium.connectOverCDP(session.connectUrl);
+    });
+
+    let results: { title?: string; content?: string }[] = [];
+    let summary = "";
+
     try {
-      const page = await browser.newPage();
-
-      // Construct the search URL
-      // O value de @procedures.ts refere-se ao valor do prompt enviado pelo usuário, ou seja, input.value.
-      // Portanto, você pode acessar assim:
-      const searchUrl = `https://search-new.pullpush.io/?type=submission&q=${event.data.value}`;
-
-      console.log(searchUrl);
-
-      await page.goto(searchUrl);
-
-      // Wait for results to load
-      await page.waitForSelector("div.results", { timeout: 10000 });
-
-      // Extract search results
-      const results = await page.evaluate(() => {
-        const posts = document.querySelectorAll("div.results div:has(h1)");
-        return Array.from(posts).map((post) => ({
-          title: post.querySelector("h1")?.textContent?.trim(),
-          content: post.querySelector("div")?.textContent?.trim(),
-        }));
+      const page = await step.run("create-browser-page", async () => {
+        return await browser.newPage();
       });
 
-      console.log("results", JSON.stringify(results, null, 2));
+      // Acessa o mecanismo de busca customizado do Reddit
+      await step.run("goto-search-url", async () => {
+        const searchUrl = `https://search-new.pullpush.io/?type=submission&q=${encodeURIComponent(
+          query
+        )}`;
+        await page.goto(searchUrl, { waitUntil: "domcontentloaded" });
+      });
 
-      return results.slice(0, 5); // Return top 5 results
+      // Aguarda os resultados aparecerem
+      await step.run("wait-results", async () => {
+        await page.waitForSelector("div.results", { timeout: 10000 });
+      });
+
+      // Extrai os resultados da busca
+      results = await step.run("extract-results", async () => {
+        return await page.evaluate(() => {
+          const posts = document.querySelectorAll("div.results div:has(h1)");
+          return Array.from(posts).map((post) => ({
+            title: post.querySelector("h1")?.textContent?.trim(),
+            content: post.querySelector("div")?.textContent?.trim(),
+          }));
+        });
+      });
+
+      summary = `Top resultados do Reddit para "${query}":\n\n${results
+        .slice(0, 5)
+        .map((r, i) => `#${i + 1}: ${r.title}\n${r.content}\n`)
+        .join("\n")}`;
+
+      await step.run("close-page", async () => {
+        if (typeof page.close === "function") {
+          await page.close();
+        }
+      });
+    } catch (error) {
+      console.error("Erro durante a busca Reddit:", error);
+      summary = "Não foi possível extrair resultados da busca no Reddit.";
     } finally {
-      await browser.close();
+      await step.run("close-browser", async () => {
+        if (browser && typeof browser.close === "function") {
+          try {
+            await browser.close();
+          } catch (err) {
+            console.warn("Erro ao fechar navegador:", err);
+          }
+        }
+      });
     }
+
+    // Salvar no banco de dados opcionalmente
+    await step.run("save-to-db", async () => {
+      return await prisma.message.create({
+        data: {
+          projectId: event.data.projectId,
+          role: "ASSISTANT",
+          type: "RESULT",
+          content: summary,
+          fragment: {
+            create: {
+              sandboxUrl,
+              sessionId,
+              title: `Resultados para: ${query}`,
+            },
+          },
+        },
+      });
+    });
+
+    return {
+      sandboxUrl,
+      sessionId,
+      query,
+      summary,
+      results: results.slice(0, 5),
+    };
   }
 );
-
-// export const scrapeTitle = inngest.createFunction(
-//   { id: "web-scrape-title" },
-//   { event: "web.scrape.title" },
-//   async ({ event, step }) => {
-//     const { prompt, projectId } = event.data;
-
-//     // 1. Inicialize Stagehand (Browserbase)
-//     const stagehand = new Stagehand({
-//       env: "BROWSERBASE",
-//       apiKey: process.env.BROWSERBASE_API_KEY,
-//       projectId: process.env.BROWSERBASE_PROJECT_ID!,
-//       modelName: "gpt-4o",
-//       modelClientOptions: {
-//         apiKey: process.env.OPENAI_API_KEY,
-//       },
-//     });
-//     await stagehand.init();
-//     const page = stagehand.page;
-
-//     // 2. Crie o agente do Inngest Agent Kit
-//     const agent = createAgent({
-//       name: "browser-agent",
-//       model: openai({ model: "gpt-4o", apiKey: process.env.OPENAI_API_KEY! }),
-//       tools: [
-//         createTool({
-//           name: "goto",
-//           description:
-//             "Navega para uma URL no navegador controlado pelo Stagehand",
-//           parameters: z.object({ url: z.string().url() }),
-//           handler: async (input) => {
-//             await page.goto(input.url);
-//             return { result: `Navegado para ${input.url}` };
-//           },
-//         }),
-//         createTool({
-//           name: "getTitle",
-//           description: "Extrai o título da página atual",
-//           parameters: z.object({}),
-//           handler: async () => {
-//             const { title } = await page.extract({
-//               instruction: "O título da página",
-//               schema: z.object({ title: z.string() }),
-//             });
-//             return { title };
-//           },
-//         }),
-//       ],
-//       system: PROMPT,
-//     });
-
-//     // 3. O agente interpreta o prompt do usuário e executa as ferramentas
-//     const agentResult = await agent.run(prompt);
-
-//     // 4. Feche o navegador
-//     await stagehand.close();
-
-//     // 5. Obtenha o título extraído do resultado do agente
-//     let title = undefined;
-//     for (const toolCall of agentResult.toolCalls) {
-//       if (
-//         toolCall.tool.name === "getTitle" &&
-//         toolCall.content &&
-//         typeof toolCall.content === "object" &&
-//         "title" in toolCall.content
-//       ) {
-//         title = toolCall.content.title;
-//         break;
-//       }
-//     }
-
-//     // 6. Obtenha o sessionId do Stagehand para replay
-//     const sessionId = (stagehand as any).session?.id || null;
-
-//     // 7. Salve ou retorne o resultado
-//     return { title, sessionId };
-//   }
-// );
