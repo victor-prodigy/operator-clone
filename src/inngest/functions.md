@@ -1,4 +1,4 @@
-// Browserless + AgentKit (Inngest) + Playwright
+// Browserbase + AgentKit (Inngest) + Playwright
 import { chromium } from "playwright-core";
 import Browserbase from "@browserbasehq/sdk";
 import { inngest } from "./client";
