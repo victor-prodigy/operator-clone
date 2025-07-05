@@ -14,7 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EyeIcon, CrownIcon, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
-import { BrowserView } from "@/components/browser-view";
+import { BrowserViewer } from "@/components/browser-view";
 
 interface Props {
   projectId: string;
@@ -58,7 +58,8 @@ export const ProjectView = ({ projectId }: Props) => {
           </div>
           <div className="h-full w-full flex items-center justify-center">
             {!!activeFragment?.sandboxUrl ? (
-              <BrowserView url={activeFragment.sandboxUrl} />
+              // <BrowserView url={activeFragment.sandboxUrl} />
+              <BrowserViewer projectId={projectId} />
             ) : (
               <p className="text-muted-foreground">
                 Nenhum resultado de browser disponível.
